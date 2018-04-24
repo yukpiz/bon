@@ -23,12 +23,14 @@ type (
 	nodeKind uint8
 
 	node struct {
-		kind        nodeKind
-		parent      *node
-		children    map[string]*node
-		middlewares []Middleware
-		handler     http.Handler
-		param       string
+		kind          nodeKind
+		parent        *node
+		children      map[string]*node
+		paramChild    *node
+		catchAllChild *node
+		middlewares   []Middleware
+		handler       http.Handler
+		paramKey      string
 	}
 
 	Middleware func(http.Handler) http.Handler
@@ -195,11 +197,11 @@ func (m *Mux) Handle(method, pattern string, handler http.Handler, middlewares .
 
 		edge := pattern[si:ei]
 		kind := nodeKindStatic
-		var param string
+		var paramKey string
 
 		switch edge[0] {
 		case ':':
-			param = edge[1:]
+			paramKey = edge[1:]
 			edge = ":"
 			kind = nodeKindParam
 		case '*':
@@ -215,14 +217,21 @@ func (m *Mux) Handle(method, pattern string, handler http.Handler, middlewares .
 
 		child.kind = kind
 
-		if len(param) > 0 {
-			child.param = param
+		if len(paramKey) > 0 {
+			child.paramKey = paramKey
 			pi++
 		}
 
 		if i >= len(pattern)-1 {
 			child.middlewares = middlewares
 			child.handler = handler
+		}
+
+		switch child.kind {
+		case nodeKindParam:
+			parent.paramChild = child
+		case nodeKindCatchAll:
+			parent.catchAllChild = child
 		}
 
 		if exist {
@@ -270,14 +279,14 @@ func (m *Mux) lookup(r *http.Request) (*node, *Context) {
 		edge := rPath[si:ei]
 
 		if child = parent.children[edge]; child == nil {
-			if child = parent.children[":"]; child != nil {
+			if child = parent.paramChild; child != nil {
 				if ctx == nil {
 					ctx = m.pool.Get().(*Context)
 				}
 
-				ctx.PutParam(child.param, edge)
-			} else if child = parent.children["*"]; child != nil && child.handler != nil {
-				backtrack = child
+				ctx.PutParam(child.paramKey, edge)
+			} else {
+				child = parent.catchAllChild
 			}
 		}
 
@@ -286,10 +295,8 @@ func (m *Mux) lookup(r *http.Request) (*node, *Context) {
 				return child, ctx
 			}
 
-			if child.kind != nodeKindCatchAll {
-				if b := parent.children["*"]; b != nil && b.handler != nil {
-					backtrack = b
-				}
+			if parent.catchAllChild != nil && parent.catchAllChild.handler != nil {
+				backtrack = parent.catchAllChild
 			}
 
 			if len(child.children) == 0 {
